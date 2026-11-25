@@ -3,6 +3,7 @@ name = "riteroad"
 version = "0.1.0"
 edition = "2024"
 repository = "https://github.com/ironcross32/riteRoad"
+license = "MIT"
 description = "An accessible control panel for the RØDE Wireless Micro"
 
 [[bin]]

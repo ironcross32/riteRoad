@@ -10,9 +10,10 @@ Updated 2026-11-25. Pick up here next session.
 - The wxDragon app is built to the agreed design in `docs/DESIGN.md`. The user
   has tested every microphone control, transmitter disconnects, and Exit from
   the tray.
-- GitHub: `ironcross32/riteRoad`, branch `master`, one commit pushed by the user.
-- **Self-install and ship-shape updates are written but untested by the
-  user, and uncommitted** (2026-11-25):
+- GitHub: `ironcross32/riteRoad`, branch `master`. CI passes.
+- **Self-install and ship-shape updates are committed, but the user hasn't
+  tested them yet** (2026-11-25). Only Ctrl+comma for Settings has been
+  checked. What changed:
   - `src/config.rs`: `settings.toml` beside the exe; `start_with_windows` is
     gone, `check_for_updates` added (on by default).
   - `src/startup.rs`: Start with Windows read from the `Run` value, compared
@@ -73,12 +74,14 @@ Updated 2026-11-25. Pick up here next session.
 
 ## Release
 
-1. Put the key in GitHub secrets: `MINISIGN_KEY` gets the contents of
-   `riteroad.key`, and `MINISIGN_PASSWORD` gets `password.txt`.
-2. The user rewrites `README.md`, then commits and pushes.
-3. To release: bump `version` in `Cargo.toml`, add a `## <version>` section
-   to `CHANGELOG.md`, tag `v<version>`, and push the tag. The first is
-   `v0.1.0`, which is already in both files.
+The key is in GitHub secrets as `MINISIGN_KEY` (the contents of
+`riteroad.key`) and `MINISIGN_PASSWORD` (`password.txt`). The user has backed
+up `%USERPROFILE%\riteRoad-signing`.
+
+To release: bump `version` in `Cargo.toml`, add a `## <version>` section to
+`CHANGELOG.md`, tag `v<version>`, and push the tag. CI (`ci.yml`) checks
+pushes to `master`; only a `v*` tag runs `release.yml`, which builds, signs
+and publishes. The two run independently. `v0.1.0` was the first.
 
 ## Notes
 
@@ -86,5 +89,5 @@ Updated 2026-11-25. Pick up here next session.
   step away first. They use the PC while Claude works.
 - The old settings in `%LOCALAPPDATA%\riteRoad` aren't migrated. The user
   will copy or delete them by hand.
-- Add a `LICENSE` file and `cargo xtask release` puts it in the zip as
-  `LICENSE.txt`. There's none yet; the user hasn't chosen one.
+- MIT licensed (`LICENSE`). `cargo xtask release` puts it in the zip as
+  `LICENSE.txt`, and installing copies it along.
