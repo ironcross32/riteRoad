@@ -1,0 +1,23 @@
+[package]
+name = "riteroad"
+version = "0.1.0"
+edition = "2024"
+description = "An accessible control panel for the RØDE Wireless Micro"
+
+[[bin]]
+name = "riteroad"
+path = "src/main.rs"
+
+[dependencies]
+doorbell = "0.1.2"
+hidapi = "2.6.7"
+key-chord = "0.2.2"
+prismer = { version = "0.1.7", features = ["static"] }
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.2.2"
+wx-utils = { version = "0.5.3", features = ["global-hotkeys", "tray"] }
+wxdragon = { version = "0.9.25", default-features = false }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Registry"] }
+
+[build-dependencies]
+shipfitter = { version = "0.2.5", default-features = false, features = ["windows-resources"] }
