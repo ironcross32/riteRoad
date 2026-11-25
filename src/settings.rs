@@ -79,10 +79,7 @@ pub fn show(parent: &dyn WxWidget, current: &Config, hooks: &Hooks) -> Option<Ed
 		.build();
 	hotkey_field.set_name("Speak status hotkey");
 	let hint = StaticText::builder(&hotkey_box)
-		.with_label(
-			"Press the keys you want while this field has focus. Delete or Backspace clears it. If nothing changes \
-			 when you press a combination, another program is already using it.",
-		)
+		.with_label("Press a hotkey for speaking the status, backspace or delete clears a binding.")
 		.build();
 	hotkey_sizer.add(&hotkey_label, 0, SizerFlag::All, padding / 2);
 	hotkey_sizer.add(&hotkey_field, 0, SizerFlag::Expand | SizerFlag::All, padding / 2);
