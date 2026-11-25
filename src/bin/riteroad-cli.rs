@@ -7,9 +7,7 @@
 //! riteroad-cli nr 1|2 off|low|high
 //! riteroad-cli watch
 
-use std::process::ExitCode;
-use std::thread::sleep;
-use std::time::Duration;
+use std::{process::ExitCode, thread::sleep, time::Duration};
 
 use hidapi::HidApi;
 use riteroad::*;

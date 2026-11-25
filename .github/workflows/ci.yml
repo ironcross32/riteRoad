@@ -1,0 +1,79 @@
+name: CI
+
+# Tags are built by the release workflow. Other branches are covered by their pull requests, since running on
+# their pushes too would test every commit twice.
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch makes an older run pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup toolchain install nightly --profile minimal --component rustfmt
+          rustup default stable
+      # rustfmt.toml groups and merges imports, which only nightly rustfmt supports. First, since it takes seconds.
+      - name: Check formatting
+        run: cargo +nightly fmt --check
+      # wxWidgets is built by wxdragon-sys, so only its locked version decides whether a cached build still fits.
+      - name: Find the locked wxdragon-sys
+        id: wxdragon
+        shell: bash
+        run: echo "hash=$(awk '/^name = "wxdragon-sys"/{f=1} f&&/^$/{exit} f' Cargo.lock | grep -E '^(version|source|checksum) ' | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+      # wxdragon-sys downloads the wxWidgets release it's built for into an empty WXWIDGETS_DIR.
+      - name: Cache wxWidgets source
+        uses: actions/cache@v6
+        with:
+          path: wxWidgets
+          key: wxwidgets-src-${{ steps.wxdragon.outputs.hash }}
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-windows-wx-${{ steps.wxdragon.outputs.hash }}
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      # After the Rust cache, since post steps run in reverse: this one saves before rust-cache's cleanup would drop it.
+      - name: Cache wxWidgets build
+        uses: actions/cache@v6
+        with:
+          path: |
+            target/debug/wxwidgets_cmake_build
+            target/debug/wxdragon_sys_cmake_build
+          key: wx-cmake-debug-${{ runner.os }}-${{ steps.wxdragon.outputs.hash }}-${{ hashFiles('.cargo/config.toml') }}
+      # A hit on the Rust cache with a miss on this one would leave wxdragon-sys counted as built with its libraries gone.
+      - name: Rebuild wxdragon-sys if its CMake output is missing
+        shell: pwsh
+        run: |
+          if (-not (Test-Path target/debug/wxwidgets_cmake_build)) {
+            cargo clean -p wxdragon-sys
+          }
+      # Clippy and the tests share one debug build. The release build, with its slow link-time optimization, is
+      # left to the release workflow.
+      - name: Clippy
+        env:
+          WXWIDGETS_DIR: ${{ github.workspace }}/wxWidgets
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Tests
+        env:
+          WXWIDGETS_DIR: ${{ github.workspace }}/wxWidgets
+        run: cargo test --locked --workspace

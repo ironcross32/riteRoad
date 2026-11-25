@@ -2,6 +2,7 @@
 name = "riteroad"
 version = "0.1.0"
 edition = "2024"
+repository = "https://github.com/ironcross32/riteRoad"
 description = "An accessible control panel for the RØDE Wireless Micro"
 
 [[bin]]
@@ -14,10 +15,22 @@ hidapi = "2.6.7"
 key-chord = "0.2.2"
 prismer = { version = "0.1.7", features = ["static"] }
 serde = { version = "1.0.229", features = ["derive"] }
+ship-shape = "0.6.1"
 toml = "1.2.2"
 wx-utils = { version = "0.5.3", features = ["global-hotkeys", "tray"] }
 wxdragon = { version = "0.9.25", default-features = false }
+windows = { version = "0.62.2", features = ["Win32_System_Com", "Win32_UI_Shell"] }
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Registry"] }
 
 [build-dependencies]
-shipfitter = { version = "0.2.5", default-features = false, features = ["windows-resources"] }
+shipfitter = { version = "0.2.5", default-features = false, features = ["docs", "windows-resources"] }
+
+[workspace]
+members = ["xtask"]
+
+[profile.release]
+strip = true
+opt-level = "z"
+lto = true
+panic = "abort"
+codegen-units = 1

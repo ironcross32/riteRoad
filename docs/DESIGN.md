@@ -40,7 +40,7 @@ receiver immediately; there is no Apply button.
 
 ## Menus
 
-- &File: &Settings, E&xit
+- &File: &Settings (Ctrl+comma), E&xit
 - &Help: &About riteRoad
 
 ## Tray icon

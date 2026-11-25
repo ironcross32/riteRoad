@@ -1,13 +1,49 @@
-//! The Settings dialog: Hotkey, Automatic announcements and Startup groups, then OK and Cancel.
-//! Nothing changes until OK.
+//! The Settings dialog: Hotkey, Automatic announcements, Startup and Updates groups, then OK and
+//! Cancel. Nothing changes until OK.
+//!
+//! Installing and uninstalling start here too. Confirming either closes the dialog as if OK had
+//! been pressed, so the settings are saved first and an install carries them along.
 
-use std::{cell::RefCell, rc::Rc};
+use std::{
+	cell::{Cell, RefCell},
+	rc::Rc,
+};
 
 use key_chord::KeyChord;
 use wx_utils::{add_ok_cancel_footer, build_ok_cancel_buttons_on, dialog_padding};
 use wxdragon::prelude::*;
 
-use crate::{config::Config, speech};
+use crate::{
+	config::Config,
+	install::{self, Options},
+	install_ui::{self, Reason},
+	speech,
+};
+
+/// Something to do once the dialog has closed and the settings are saved.
+#[derive(Debug, Clone, Copy)]
+pub enum Action {
+	Install(Options),
+	Uninstall { delete_settings: bool },
+}
+
+/// What OK returns.
+pub struct Edited {
+	pub config: Config,
+	pub start_with_windows: bool,
+	pub action: Option<Action>,
+}
+
+/// What the dialog needs from the app.
+pub struct Hooks {
+	/// Whether Windows starts this copy now.
+	pub start_with_windows: bool,
+	/// The Check for updates button.
+	pub check_for_updates: Rc<dyn Fn()>,
+	/// Called with the dialog once it's built, and with `None` once it has closed, so the app can
+	/// end it as if OK had been pressed when an update needs riteRoad to exit.
+	pub opened: Box<dyn Fn(Option<Dialog>)>,
+}
 
 /// Keys the hotkey field lets through rather than captures: Tab and Shift+Tab move focus, Escape
 /// cancels the dialog, and the arrows keep the screen reader's own navigation working.
@@ -26,7 +62,8 @@ fn group(panel: &Panel, label: &str) -> (StaticBoxSizer, StaticBox) {
 }
 
 /// Shows the dialog. Returns the edited settings on OK, or `None` on Cancel.
-pub fn show(parent: &dyn WxWidget, current: &Config) -> Option<Config> {
+#[allow(clippy::too_many_lines)] // One linear run of layout and wiring.
+pub fn show(parent: &dyn WxWidget, current: &Config, hooks: &Hooks) -> Option<Edited> {
 	let dialog = Dialog::builder(parent, "riteRoad Settings").build();
 	let padding = dialog_padding(&dialog);
 	let panel = Panel::builder(&dialog).build();
@@ -115,11 +152,64 @@ pub fn show(parent: &dyn WxWidget, current: &Config) -> Option<Config> {
 	content.add_sizer(&announce_sizer, 0, SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right, padding);
 
 	// Startup
+	let action: Rc<Cell<Option<Action>>> = Rc::new(Cell::new(None));
+	let installed_copy = install::is_installed_copy();
 	let (startup_sizer, startup_box) = group(&panel, "Startup");
 	let start_with_windows = CheckBox::builder(&startup_box).with_label("Start with Windows").build();
-	start_with_windows.set_value(current.start_with_windows);
+	start_with_windows.set_value(hooks.start_with_windows);
 	startup_sizer.add(&start_with_windows, 0, SizerFlag::All, padding / 2);
+	let install_label = if installed_copy { "Uninstall from this PC" } else { "Install to this PC" };
+	let install_button = Button::builder(&startup_box).with_label(install_label).build();
+	startup_sizer.add(&install_button, 0, SizerFlag::All, padding / 2);
 	content.add_sizer(&startup_sizer, 0, SizerFlag::Expand | SizerFlag::All, padding);
+
+	// Only the installed copy is ever started by Windows, so ticking the box anywhere else offers to
+	// install. Declining unticks it again, and nothing is written.
+	let install_from = {
+		let action = Rc::clone(&action);
+		move |reason: Reason| match install_ui::ask_install(&dialog, reason) {
+			Some(options) => {
+				action.set(Some(Action::Install(options)));
+				dialog.end_modal(ID_OK);
+				true
+			}
+			None => false,
+		}
+	};
+	if !installed_copy {
+		start_with_windows.on_toggled({
+			let install_from = install_from.clone();
+			move |_| {
+				if start_with_windows.get_value() && !install_from(Reason::StartWithWindows) {
+					start_with_windows.set_value(false);
+				}
+			}
+		});
+	}
+	install_button.on_click({
+		let action = Rc::clone(&action);
+		move |_| {
+			if installed_copy {
+				if let Some(delete_settings) = install_ui::ask_uninstall(&dialog, true) {
+					action.set(Some(Action::Uninstall { delete_settings }));
+					dialog.end_modal(ID_OK);
+				}
+			} else {
+				install_from(Reason::Button);
+			}
+		}
+	});
+
+	// Updates
+	let (updates_sizer, updates_box) = group(&panel, "Updates");
+	let check_at_startup = CheckBox::builder(&updates_box).with_label("Check for updates at startup").build();
+	check_at_startup.set_value(current.check_for_updates);
+	updates_sizer.add(&check_at_startup, 0, SizerFlag::All, padding / 2);
+	let check_now = Button::builder(&updates_box).with_label("Check for updates").build();
+	updates_sizer.add(&check_now, 0, SizerFlag::All, padding / 2);
+	content.add_sizer(&updates_sizer, 0, SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right, padding);
+	let check_for_updates = Rc::clone(&hooks.check_for_updates);
+	check_now.on_click(move |_| check_for_updates());
 
 	let (ok, cancel) = build_ok_cancel_buttons_on(&panel, &dialog, "OK");
 	add_ok_cancel_footer(content, ok, cancel);
@@ -130,15 +220,24 @@ pub fn show(parent: &dyn WxWidget, current: &Config) -> Option<Config> {
 	dialog.centre();
 	hotkey_field.set_focus();
 
+	(hooks.opened)(Some(dialog));
 	let result = dialog.show_modal();
+	(hooks.opened)(None);
 	let edited = (result == ID_OK).then(|| {
 		let mut config = current.clone();
 		config.set_hotkey(chord.borrow().as_ref());
 		config.announce_receiver = receiver.get_value();
 		config.announce_transmitters = transmitters.get_value();
 		config.announce_battery = battery.get_value();
-		config.start_with_windows = start_with_windows.get_value();
-		config
+		config.check_for_updates = check_at_startup.get_value();
+		let action = action.get();
+		// An install sets up Start with Windows itself, for the installed copy.
+		let start_with_windows = if matches!(action, Some(Action::Install(_))) {
+			hooks.start_with_windows
+		} else {
+			start_with_windows.get_value()
+		};
+		Edited { config, start_with_windows, action }
 	});
 	dialog.destroy();
 	edited

@@ -1,83 +1,90 @@
 # riteRoad handoff
 
-Written 2026-11-24. Pick up here next session.
+Updated 2026-11-25. Pick up here next session.
 
 ## Where things stand
 
 - The receiver's HID protocol is decoded and documented in `docs/PROTOCOL.md`.
 - The control library (`src/protocol.rs`, `src/device.rs`) and the test tool
   `riteroad-cli` work against the real receiver.
-- The wxDragon app (`src/main.rs` and modules) is built to the agreed design
-  in `docs/DESIGN.md`. The user has tested every microphone control,
-  transmitter disconnects, and Exit from the tray, all good.
-- Tests: 14 unit tests pass, and clippy is clean.
-- **Nothing is committed yet.** The repo is on branch `master` with no
-  commits, and has no GitHub remote yet.
+- The wxDragon app is built to the agreed design in `docs/DESIGN.md`. The user
+  has tested every microphone control, transmitter disconnects, and Exit from
+  the tray.
+- GitHub: `ironcross32/riteRoad`, branch `master`, one commit pushed by the user.
+- **Self-install and ship-shape updates are written but untested by the
+  user, and uncommitted** (2026-11-25):
+  - `src/config.rs`: `settings.toml` beside the exe; `start_with_windows` is
+    gone, `check_for_updates` added (on by default).
+  - `src/startup.rs`: Start with Windows read from the `Run` value, compared
+    with the running exe. `src/registry.rs` holds the registry calls.
+  - `src/install.rs`, `src/install_ui.rs`: install, uninstall, shortcuts, the
+    Add/Remove Programs entry, and their dialogs.
+  - `src/update.rs`: ship-shape, portable, `-x64`/`-arm64`.
+  - `src/settings.rs`, `src/app.rs`, `src/main.rs`: the Startup button, the
+    Updates group, `--uninstall`, and routing every exit through `exiting`.
+  - `xtask/`: `cargo xtask release` and `cargo xtask keygen <folder>`.
+  - `build.rs` converts `README.md` to `README.html` beside the exe.
+  - `.github/workflows/ci.yml` and `release.yml`, adapted from headroom.
+  - `README.md` (a first draft the user will rewrite) and `CHANGELOG.md`.
+- Signing key: made with `cargo xtask keygen` in `%USERPROFILE%\riteRoad-signing`
+  (`riteroad.key`, `password.txt`, `riteroad.pub`). The public key is in
+  `src/update.rs`. The user must back that folder up somewhere safe.
 
-## Loose ends
+## How the pieces fit
 
-1. **The hotkey field in Settings should now be reachable with Tab, but the
-   user hasn't confirmed it.** wxWidgets drops read-only single-line text
-   fields from the Tab order, so the field is now multi-line. Enter in the
-   field presses OK explicitly (`src/settings.rs`). Check with NVDA:
-   - Tab and Shift+Tab reach the field.
-   - Enter still means OK, and Escape still means Cancel.
-   - Capturing a key and clearing with Delete still work.
-2. **Start with Windows points at `target\debug\riteroad.exe`.** The user
-   turned it on, and the registry Run value stores the debug build's path. An
-   installer would fix this by giving a stable path.
-3. **File > Exit hasn't been tested from the menu.** An earlier "works"
-   result was wrong: the test keystrokes went to the user's own windows. The
-   tray Exit (tested by the user) and the Exit button (tested) both exit with
-   code 0. File > Exit uses the same code path.
-4. **Panic log:** panics are written to `%LOCALAPPDATA%\riteRoad\panic.log`.
-   None have occurred so far.
-5. **Don't send keystrokes to the desktop for testing without asking the user
-   to step away first.** They use the PC while Claude works.
+- An update, an install handing over, and an uninstall all exit through
+  `App::exiting` (see the module doc in `src/app.rs`). ship-shape's exit
+  handler sets `App::update_exit`, an `Arc<AtomicBool>`, because the handler
+  must be `Send` and `App` isn't. The tick sees it, and if Settings is open,
+  ends the dialog with OK first, so its changes are saved.
+- riteRoad is single instance. A second launch passes its arguments to the
+  running copy through doorbell, so `riteroad.exe --uninstall` from
+  Add/Remove Programs reaches the running copy, which shows the uninstall
+  dialog. With no copy running, `app::uninstall_alone` shows only the dialog.
+- The installed copy can't delete itself, and it can't start while the
+  portable copy runs, so both handovers use a hidden PowerShell helper that
+  waits for this process to exit (`install::run_after_exit`). The install
+  handover sets ship-shape's `SHIP_SHAPE_RELAUNCHED` marker, so
+  `bring_to_front_after_update` brings the installed copy's window forward.
+- The update check's dialogs are parented to the main frame, not Settings, so
+  closing Settings mid-check can't leave them without a parent.
+- The automatic check skips silently when the folder isn't writable. The
+  button shows a plain error box instead.
 
-## Next: self-install and ship-shape updates
+## To test (with NVDA)
 
-Decided with the user on 2026-11-25. The agreed behaviour is in
-`docs/DESIGN.md` (Settings dialog, and "Install, uninstall and updates").
-This replaces the earlier Inno Setup plan, and settles loose end 2: the `Run`
-value will only ever point at the installed copy.
+1. From `target\debug` (portable): Settings shows Install to this PC, and
+   Start with Windows is unticked. The old `Run` value points at
+   `target\debug\riteroad.exe`, so it may show ticked. Untick it once.
+2. Tick Start with Windows: the install dialog opens with Start with Windows
+   ticked. Cancel unticks the box and writes nothing.
+3. Install: the portable copy closes, and the installed copy opens in front,
+   with the same settings. Check the Start menu shortcut, Installed apps, and
+   the `Run` value.
+4. In the installed copy: the button reads Uninstall from this PC.
+5. Uninstall from Installed apps, both with riteRoad running and without it.
+   The folder should be empty, or hold only `settings.toml`.
+6. Check for updates with no release yet: it should report an error, or
+   that it couldn't find an update.
+7. The hotkey field in Settings is reachable with Tab, and Enter still means
+   OK (from the last session; never confirmed).
+8. File > Exit from the menu (never tested; same code path as the other
+   exits).
 
-Library: <https://github.com/accessware/ship-shape> (0.6.1 is in the cargo
-cache). `C:\programming\headroom` is the working reference for `update.rs`,
-`build.rs`, `xtask/`, `release.yml` and `CHANGELOG.md`. Skip its Inno Setup
-template: riteRoad has no installer.
+## Release
 
-### App work
+1. Put the key in GitHub secrets: `MINISIGN_KEY` gets the contents of
+   `riteroad.key`, and `MINISIGN_PASSWORD` gets `password.txt`.
+2. The user rewrites `README.md`, then commits and pushes.
+3. To release: bump `version` in `Cargo.toml`, add a `## <version>` section
+   to `CHANGELOG.md`, tag `v<version>`, and push the tag. The first is
+   `v0.1.0`, which is already in both files.
 
-1. Config: move `settings.toml` and `panic.log` beside the exe, and drop
-   `start_with_windows` from `Config`. `startup.rs` should report whether the
-   `Run` value points at the running exe.
-2. Install, uninstall, `--uninstall`, and the install dialog, as in
-   `DESIGN.md`. riteRoad is single instance (`ring` in `src/main.rs`), so the
-   installed copy must start only after the portable copy has exited. Use a
-   detached helper that waits on the PID, as ship-shape's scripts do.
-3. Settings: the Install/Uninstall button in Startup, and a new Updates group
-   (a "Check for updates at startup" checkbox, on by default, then a "Check
-   for updates" button).
-4. `src/update.rs`: `UpdaterConfig::new("ironcross32/riteRoad", "riteroad",
-   "riteRoad", PUBLIC_KEY, env!("CARGO_PKG_VERSION"))`, with
-   `InstallKind::Portable` and an asset suffix of `-x64` or `-arm64` chosen
-   by `cfg!(target_arch)`. Use
-   `ui::run_update_check_with_exit_handler` with a handler that sets
-   `App::exiting` (see the module doc in `src/app.rs`). Check that the folder
-   is writable first, and show a plain error box if it isn't.
-5. Call `ui::bring_to_front_after_update(&frame)` after the window is first
-   shown. A relaunch after an update has no `--tray`, so the window shows.
+## Notes
 
-### Release work
-
-6. Create `ironcross32/riteRoad` on GitHub and generate a new minisign key
-   pair. The public key goes in `update.rs`; the secret key and its password
-   go into GitHub secrets.
-7. CI builds x64 and ARM64 and publishes `riteroad-x64.zip` and
-   `riteroad-arm64.zip` (exe at the zip root; never `settings.toml` or
-   `panic.log`), each with a `.minisig`. It's triggered by `v*` tags.
-8. Generate `README.html` from the README in local and CI builds. The user
-   will edit the README before the first push.
-9. The first release is `v0.1.0`. Routine: bump `Cargo.toml`, add a
-   `## <version>` section to `CHANGELOG.md`, tag, and push the tag.
+- Don't send keystrokes to the desktop for testing without asking the user to
+  step away first. They use the PC while Claude works.
+- The old settings in `%LOCALAPPDATA%\riteRoad` aren't migrated. The user
+  will copy or delete them by hand.
+- Add a `LICENSE` file and `cargo xtask release` puts it in the zip as
+  `LICENSE.txt`. There's none yet; the user hasn't chosen one.

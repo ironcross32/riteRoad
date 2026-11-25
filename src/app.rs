@@ -6,28 +6,40 @@
 //! that stops the timer and the poller, lets go of the hotkey and removes the tray icon, before
 //! wxWidgets destroys the window. Closing the window any other way (X, Alt+F4) is vetoed and
 //! hides it to the tray instead.
+//!
+//! An update ready to install, an install handing over to the installed copy and an uninstall all
+//! end riteRoad through `exiting` too. An update that arrives while Settings is open first ends
+//! the dialog as if OK had been pressed, so its changes are saved.
 
 use std::{
 	cell::{Cell, OnceCell, RefCell},
-	mem,
+	env, mem,
 	rc::{Rc, Weak},
-	sync::mpsc::{Receiver, Sender},
+	sync::{
+		Arc,
+		atomic::{AtomicBool, Ordering},
+		mpsc::{Receiver, Sender},
+	},
 	time::{Duration, Instant},
 };
 
 use key_chord::KeyChord;
 use riteroad::{LedBrightness, NoiseReduction, OutputGain, OutputMode, Transmitter, TxStatus};
 use wx_utils::{
-	AboutBoxBuilder, global_hotkeys::GlobalHotkeys, post_to_ui, show_error, show_warning, tray::Visibility,
+	AboutBoxBuilder, global_hotkeys::GlobalHotkeys, post_to_ui, show_error, show_info, show_warning, tray::Visibility,
 };
 use wxdragon::{prelude::*, timer::Timer};
 
 use crate::{
 	config::Config,
+	install::{self, UNINSTALL_ARG},
+	install_ui,
 	poller::{Command, Latest, read_latest},
-	settings, speech, startup,
+	settings::{self, Action, Hooks},
+	speech, startup,
 	status::{Announcer, Category, ReceiverState, Snapshot, status_text, summary},
 	tray::{Handlers, Tray},
+	update,
 };
 
 pub const APP_NAME: &str = "riteRoad";
@@ -48,8 +60,9 @@ pub struct Channels {
 	pub commands: Sender<Command>,
 	/// Why a change failed, to speak.
 	pub failures: Receiver<String>,
-	/// A second copy was started, so come to the front.
-	pub raise: Receiver<()>,
+	/// A second copy was started, with these arguments. Come to the front, or with `--uninstall`,
+	/// offer to uninstall.
+	pub messages: Receiver<Vec<String>>,
 	/// Started by Windows at sign-in: stay in the tray.
 	pub start_hidden: bool,
 }
@@ -81,6 +94,10 @@ struct App {
 	/// The tray asked for Settings; the timer opens it once the tray menu has returned.
 	settings_requested: Cell<bool>,
 	settings_open: Cell<bool>,
+	/// The Settings dialog while it's open.
+	settings_dialog: Rc<Cell<Option<Dialog>>>,
+	/// Set by ship-shape, from any thread, once an update is ready and riteRoad must exit.
+	update_exit: Arc<AtomicBool>,
 	config: RefCell<Config>,
 	hotkeys: RefCell<Option<GlobalHotkeys>>,
 	latest: Latest,
@@ -95,7 +112,7 @@ struct App {
 }
 
 pub fn run(channels: Channels) {
-	let Channels { latest, commands, failures, raise, start_hidden } = channels;
+	let Channels { latest, commands, failures, messages, start_hidden } = channels;
 	speech::init();
 	let Controls { frame, panel, status, mode, gain, led, nr_target, nr_level, exit } = lay_out();
 	let app = Rc::new(App {
@@ -111,6 +128,8 @@ pub fn run(channels: Channels) {
 		exiting: Cell::new(false),
 		settings_requested: Cell::new(false),
 		settings_open: Cell::new(false),
+		settings_dialog: Rc::new(Cell::new(None)),
+		update_exit: Arc::new(AtomicBool::new(false)),
 		config: RefCell::new(Config::load()),
 		hotkeys: RefCell::new(None),
 		latest,
@@ -189,7 +208,7 @@ pub fn run(channels: Channels) {
 	let timer = Timer::new(&panel);
 	timer.on_tick({
 		let app = Rc::downgrade(&app);
-		move |_| with(&app, |app| app.tick(&raise, &failures))
+		move |_| with(&app, |app| app.tick(&messages, &failures))
 	});
 	timer.start(UI_TICK_MS, false);
 
@@ -222,7 +241,26 @@ pub fn run(channels: Channels) {
 	if !start_hidden {
 		app.visibility.come_forward();
 		app.status.set_focus();
+		update::come_forward_after_update(&app.frame);
 	}
+	install::refresh_uninstaller();
+	if app.config.borrow().check_for_updates {
+		update::check(&app.frame, true, &app.update_exit);
+	}
+}
+
+/// `riteroad.exe --uninstall` with no copy running, as Add/Remove Programs starts it: only the
+/// uninstall dialog, then exit.
+pub fn uninstall_alone() {
+	// The dialog needs a parent. It's never shown.
+	let frame = Frame::builder().with_title(APP_NAME).build();
+	if let Some(delete_settings) = install_ui::ask_uninstall(&frame, false) {
+		match install::uninstall(delete_settings) {
+			Ok(()) => show_info(&frame, "riteRoad has been uninstalled.", APP_NAME),
+			Err(error) => show_error(&frame, format!("Couldn't uninstall riteRoad: {error}"), APP_NAME),
+		}
+	}
+	frame.destroy();
 }
 
 /// Runs `f` on the app if it still exists, so handlers don't keep it alive.
@@ -286,7 +324,7 @@ fn group(panel: &Panel, label: &str) -> (StaticBoxSizer, StaticBox) {
 fn lay_out() -> Controls {
 	let frame = Frame::builder().with_title(&format!("{APP_NAME} - RØDE Wireless Micro")).build();
 	let file = Menu::builder()
-		.append_item(ID_SETTINGS, "&Settings…", "Change riteRoad's settings")
+		.append_item(ID_SETTINGS, "&Settings…\tCtrl+,", "Change riteRoad's settings")
 		.append_separator()
 		.append_item(ID_EXIT, "E&xit", "Close riteRoad")
 		.build();
@@ -340,7 +378,15 @@ fn index_of<T: PartialEq>(all: &[T], value: T) -> usize {
 }
 
 impl App {
-	fn tick(&self, raise: &Receiver<()>, failures: &Receiver<String>) {
+	fn tick(&self, messages: &Receiver<Vec<String>>, failures: &Receiver<String>) {
+		if self.update_exit.swap(false, Ordering::SeqCst) {
+			self.exiting.set(true);
+			if let Some(dialog) = self.settings_dialog.get() {
+				// Saves Settings' changes before going; the next tick closes the frame.
+				dialog.end_modal(ID_OK);
+				return;
+			}
+		}
 		if self.exiting.get() {
 			// Closing the frame under a modal dialog upsets wxWidgets, so ask the dialog to close
 			// first and come back on a later tick.
@@ -349,8 +395,13 @@ impl App {
 			}
 			return;
 		}
-		if raise.try_iter().count() > 0 {
+		let messages: Vec<Vec<String>> = messages.try_iter().collect();
+		if !messages.is_empty() {
 			self.visibility.come_forward();
+			if messages.iter().flatten().any(|arg| arg == UNINSTALL_ARG) {
+				self.uninstall();
+				return;
+			}
 		}
 		if self.settings_requested.replace(false) {
 			self.visibility.come_forward();
@@ -505,14 +556,33 @@ impl App {
 		// rather than spoken.
 		drop(self.hotkeys.borrow_mut().take());
 		let current = self.config.borrow().clone();
-		let edited = settings::show(&self.frame, &current);
-		let mut config = edited.unwrap_or_else(|| current.clone());
-		if config.start_with_windows != current.start_with_windows
-			&& let Err(error) = startup::set_enabled(config.start_with_windows)
+		let started_with_windows = startup::is_enabled();
+		let hooks = Hooks {
+			start_with_windows: started_with_windows,
+			check_for_updates: Rc::new({
+				let (frame, exit) = (self.frame, Arc::clone(&self.update_exit));
+				move || update::check(&frame, false, &exit)
+			}),
+			opened: Box::new({
+				let slot = Rc::clone(&self.settings_dialog);
+				move |dialog| slot.set(dialog)
+			}),
+		};
+		let edited = settings::show(&self.frame, &current, &hooks);
+		let action = edited.as_ref().and_then(|edited| edited.action);
+		if let Some(edited) = &edited
+			&& edited.start_with_windows != started_with_windows
 		{
-			show_error(&self.frame, format!("Couldn't change Start with Windows: {error}"), APP_NAME);
-			config.start_with_windows = current.start_with_windows;
+			let changed = if edited.start_with_windows {
+				env::current_exe().and_then(|exe| startup::enable_for(&exe))
+			} else {
+				startup::disable()
+			};
+			if let Err(error) = changed {
+				show_error(&self.frame, format!("Couldn't change Start with Windows: {error}"), APP_NAME);
+			}
 		}
+		let mut config = edited.map_or_else(|| current.clone(), |edited| edited.config);
 		let wanted = config.hotkey();
 		if !self.register_hotkey(wanted.as_ref()) {
 			if let Some(chord) = &wanted {
@@ -529,6 +599,38 @@ impl App {
 			*self.config.borrow_mut() = config;
 		}
 		self.settings_open.set(false);
+		match action {
+			Some(Action::Install(options)) => self.install(options),
+			Some(Action::Uninstall { delete_settings }) => self.finish_uninstall(delete_settings),
+			None => {}
+		}
+	}
+
+	/// Installs this copy, then hands over to the installed one.
+	fn install(&self, options: install::Options) {
+		match install::install(options).and_then(|()| install::start_installed_copy_after_exit()) {
+			Ok(()) => self.exiting.set(true),
+			Err(error) => show_error(&self.frame, format!("Couldn't install riteRoad: {error}"), APP_NAME),
+		}
+	}
+
+	/// Add/Remove Programs asked, through a second copy.
+	fn uninstall(&self) {
+		if self.settings_open.get() {
+			return;
+		}
+		if let Some(delete_settings) = install_ui::ask_uninstall(&self.frame, install::is_installed_copy()) {
+			self.finish_uninstall(delete_settings);
+		}
+	}
+
+	fn finish_uninstall(&self, delete_settings: bool) {
+		match install::uninstall(delete_settings) {
+			// The installed copy's files can only go once it has exited. Any other copy carries on.
+			Ok(()) if install::is_installed_copy() => self.exiting.set(true),
+			Ok(()) => show_info(&self.frame, "riteRoad has been uninstalled.", APP_NAME),
+			Err(error) => show_error(&self.frame, format!("Couldn't uninstall riteRoad: {error}"), APP_NAME),
+		}
 	}
 
 	fn about(&self) {

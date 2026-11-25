@@ -1,7 +1,9 @@
 //! HID transport for the RØDE Wireless Micro receiver.
 
-use std::fmt;
-use std::time::{Duration, Instant};
+use std::{
+	fmt,
+	time::{Duration, Instant},
+};
 
 use hidapi::{HidApi, HidDevice};
 

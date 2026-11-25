@@ -1,0 +1,7 @@
+[alias]
+xtask = "run -p xtask --release --"
+
+# The C runtime links into the executable, so it runs without the Visual C++ redistributable. The
+# Universal CRT stays dynamic: every supported Windows has it.
+[target.'cfg(target_env = "msvc")']
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-arg=/nodefaultlib:libucrt.lib", "-C", "link-arg=ucrt.lib"]
